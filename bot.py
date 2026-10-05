@@ -3,7 +3,6 @@ import json
 import os
 import random
 import logging
-from datetime import datetime
 
 import requests
 from aiogram import Bot, html
@@ -89,25 +88,17 @@ async def process_pending_commands(state: dict):
 
 
 # === ЛОГІКА РОБОТИ З API ВРУ ===
-def get_vru_token() -> str | None:
-    try:
-        response = requests.get("https://data.rada.gov.ua/api/token", timeout=10)
-        if response.status_code == 200:
-            return response.text.strip()
-        logger.error(f"Помилка отримання токена: {response.status_code}")
-    except Exception as e:
-        logger.error(f"Помилка підключення до API ВРУ: {e}")
-    return None
+# GitHub Actions runner щоразу має нову, незареєстровану IP-адресу, тому
+# персональний токен з /api/token (який прив'язаний до зареєстрованої IP)
+# тут не підходить. За документацією порталу JSON-картка документа та
+# списки документів доступні БЕЗ реєстрації, якщо передавати User-Agent
+# рядком "OpenData" — саме це й використовуємо.
+VRU_USER_AGENT = "OpenData"
 
 
 async def check_new_laws(state: dict):
     logger.info("Запуск перевірки оновлень ВРУ...")
-    token = get_vru_token()
-    if not token:
-        logger.error("Немає токена, скасування перевірки.")
-        return
-
-    headers = {"User-Agent": token, "Accept": "application/json"}
+    headers = {"User-Agent": VRU_USER_AGENT, "Accept": "application/json"}
     processed = set(state.get("processed_documents", []))
 
     try:
@@ -115,10 +106,14 @@ async def check_new_laws(state: dict):
         list_resp = await asyncio.to_thread(requests.get, list_url, headers=headers, timeout=15)
 
         if list_resp.status_code != 200:
-            logger.error(f"Не вдалося отримати список: {list_resp.status_code}")
+            logger.error(f"Не вдалося отримати список: {list_resp.status_code} — {list_resp.text[:300]!r}")
             return
 
-        documents = list_resp.json()
+        try:
+            documents = list_resp.json()
+        except ValueError:
+            logger.error(f"Список не є JSON (перші 300 символів): {list_resp.text[:300]!r}")
+            return
         new_nregs = []
 
         for item in documents:
@@ -140,31 +135,41 @@ async def check_new_laws(state: dict):
             card_url = f"https://data.rada.gov.ua/laws/card/{nreg}.json"
             card_resp = await asyncio.to_thread(requests.get, card_url, headers=headers, timeout=15)
 
-            if card_resp.status_code == 200:
+            if card_resp.status_code != 200:
+                logger.error(f"Картка {nreg}: {card_resp.status_code} — {card_resp.text[:200]!r}")
+                processed.add(nreg)
+                continue
+
+            try:
                 card_data = card_resp.json()
-                doc_info = card_data.get('doc', {})
+            except ValueError:
+                logger.error(f"Картка {nreg} не є JSON: {card_resp.text[:200]!r}")
+                processed.add(nreg)
+                continue
 
-                title = doc_info.get('nazva', 'Без назви')
-                doc_url = f"https://data.rada.gov.ua/laws/show/{nreg}"
+            doc_info = card_data.get('doc', {})
 
-                msg_text = (
-                    f"🏛 <b>Оновлення законодавства</b>\n\n"
-                    f"<b>Назва:</b> {html.quote(title)}\n"
-                    f"<b>Номер:</b> {html.quote(nreg)}\n\n"
-                    f"📄 <a href='{doc_url}'>Переглянути документ</a>"
-                )
+            title = doc_info.get('nazva', 'Без назви')
+            doc_url = f"https://data.rada.gov.ua/laws/show/{nreg}"
 
-                if CHANNEL_ID:
-                    try:
-                        await bot.send_message(CHANNEL_ID, msg_text)
-                    except Exception as e:
-                        logger.error(f"Помилка відправки в канал: {e}")
+            msg_text = (
+                f"🏛 <b>Оновлення законодавства</b>\n\n"
+                f"<b>Назва:</b> {html.quote(title)}\n"
+                f"<b>Номер:</b> {html.quote(nreg)}\n\n"
+                f"📄 <a href='{doc_url}'>Переглянути документ</a>"
+            )
 
-                for chat_id in users:
-                    try:
-                        await bot.send_message(chat_id, msg_text)
-                    except Exception as e:
-                        logger.error(f"Помилка відправки користувачу {chat_id}: {e}")
+            if CHANNEL_ID:
+                try:
+                    await bot.send_message(CHANNEL_ID, msg_text)
+                except Exception as e:
+                    logger.error(f"Помилка відправки в канал: {e}")
+
+            for chat_id in users:
+                try:
+                    await bot.send_message(chat_id, msg_text)
+                except Exception as e:
+                    logger.error(f"Помилка відправки користувачу {chat_id}: {e}")
 
             processed.add(nreg)
 

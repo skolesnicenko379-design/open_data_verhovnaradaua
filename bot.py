@@ -90,71 +90,83 @@ async def process_pending_commands(state: dict):
 # === ЛОГІКА РОБОТИ З API ВРУ ===
 # GitHub Actions runner щоразу має нову, незареєстровану IP-адресу, тому
 # персональний токен з /api/token (який прив'язаний до зареєстрованої IP)
-# тут не підходить. За документацією порталу JSON-картка документа та
-# списки документів доступні БЕЗ реєстрації, якщо передавати User-Agent
-# рядком "OpenData" — саме це й використовуємо.
+# тут не підходить. За документацією порталу JSON-списки та картки
+# документів доступні БЕЗ реєстрації, якщо передавати User-Agent рядком
+# "OpenData" — саме це й використовуємо.
 VRU_USER_AGENT = "OpenData"
+
+# /laws/main/r/docs.json повертає лише "dokid" (внутрішній числовий id), а
+# НЕ "nreg" (системний номер документа), який потрібен для /laws/card і
+# /laws/show. Натомість /laws/main/r[/pageN].json одразу віддає повні
+# реквізити кожного документа (dokid, nreg, nazva, ...), тож окремий запит
+# картки на кожен документ більше не потрібен.
+LIST_URL_TEMPLATE = "https://data.rada.gov.ua/laws/main/r{page_suffix}.json"
+MAX_LIST_PAGES = 3  # скільки сторінок списку переглядати за один прогін
+
+
+def _extract_doc_fields(item: dict) -> dict:
+    # Деякі відповіді порталу гніздять поля документа під ключем "doc",
+    # інші віддають їх на верхньому рівні — підтримуємо обидва варіанти.
+    return item.get("doc", item) if isinstance(item, dict) else {}
 
 
 async def check_new_laws(state: dict):
     logger.info("Запуск перевірки оновлень ВРУ...")
     headers = {"User-Agent": VRU_USER_AGENT, "Accept": "application/json"}
     processed = set(state.get("processed_documents", []))
+    users = state.get("users", [])
 
     try:
-        list_url = "https://data.rada.gov.ua/laws/main/r/docs.json"
-        list_resp = await asyncio.to_thread(requests.get, list_url, headers=headers, timeout=15)
+        new_docs = []  # [(nreg, nazva), ...] у порядку надходження
 
-        if list_resp.status_code != 200:
-            logger.error(f"Не вдалося отримати список: {list_resp.status_code} — {list_resp.text[:300]!r}")
-            return
+        for page in range(1, MAX_LIST_PAGES + 1):
+            page_suffix = "" if page == 1 else f"/page{page}"
+            list_url = LIST_URL_TEMPLATE.format(page_suffix=page_suffix)
+            list_resp = await asyncio.to_thread(requests.get, list_url, headers=headers, timeout=15)
 
-        try:
-            documents = list_resp.json()
-        except ValueError:
-            logger.error(f"Список не є JSON (перші 300 символів): {list_resp.text[:300]!r}")
-            return
-        new_nregs = []
+            if list_resp.status_code != 200:
+                logger.error(f"Список (стор. {page}): {list_resp.status_code} — {list_resp.text[:300]!r}")
+                break
 
-        for item in documents:
-            nreg = item.get('nreg') if isinstance(item, dict) else str(item)
-            if nreg and nreg not in processed:
-                new_nregs.append(nreg)
+            try:
+                documents = list_resp.json()
+            except ValueError:
+                logger.error(f"Список (стор. {page}) не є JSON: {list_resp.text[:300]!r}")
+                break
 
-        if not new_nregs:
+            if not documents:
+                break  # далі сторінок немає
+
+            page_had_new = False
+            for item in documents:
+                doc_info = _extract_doc_fields(item)
+                nreg = doc_info.get("nreg")
+                if not nreg or nreg in processed:
+                    continue
+                page_had_new = True
+                nazva = doc_info.get("nazva", "Без назви")
+                new_docs.append((nreg, nazva))
+
+            # якщо на цій сторінці все вже оброблено раніше — подальші
+            # (ще старіші) сторінки точно нічого нового не дадуть
+            if not page_had_new:
+                break
+
+            if page < MAX_LIST_PAGES:
+                await asyncio.sleep(random.uniform(5.0, 7.0))
+
+        if not new_docs:
             logger.info("Нових документів немає.")
             return
 
-        logger.info(f"Знайдено нових документів: {len(new_nregs)}")
-        users = state.get("users", [])
+        logger.info(f"Знайдено нових документів: {len(new_docs)}")
 
-        for nreg in new_nregs[:MAX_DOCS_PER_RUN]:
-            delay = random.uniform(5.0, 7.0)
-            await asyncio.sleep(delay)
-
-            card_url = f"https://data.rada.gov.ua/laws/card/{nreg}.json"
-            card_resp = await asyncio.to_thread(requests.get, card_url, headers=headers, timeout=15)
-
-            if card_resp.status_code != 200:
-                logger.error(f"Картка {nreg}: {card_resp.status_code} — {card_resp.text[:200]!r}")
-                processed.add(nreg)
-                continue
-
-            try:
-                card_data = card_resp.json()
-            except ValueError:
-                logger.error(f"Картка {nreg} не є JSON: {card_resp.text[:200]!r}")
-                processed.add(nreg)
-                continue
-
-            doc_info = card_data.get('doc', {})
-
-            title = doc_info.get('nazva', 'Без назви')
+        for nreg, nazva in new_docs[:MAX_DOCS_PER_RUN]:
             doc_url = f"https://data.rada.gov.ua/laws/show/{nreg}"
 
             msg_text = (
                 f"🏛 <b>Оновлення законодавства</b>\n\n"
-                f"<b>Назва:</b> {html.quote(title)}\n"
+                f"<b>Назва:</b> {html.quote(nazva)}\n"
                 f"<b>Номер:</b> {html.quote(nreg)}\n\n"
                 f"📄 <a href='{doc_url}'>Переглянути документ</a>"
             )
@@ -172,6 +184,9 @@ async def check_new_laws(state: dict):
                     logger.error(f"Помилка відправки користувачу {chat_id}: {e}")
 
             processed.add(nreg)
+
+        # документи поза MAX_DOCS_PER_RUN лишаємо необробленими навмисно —
+        # вони підтягнуться в наступному прогоні (через 30 хв)
 
     except Exception as e:
         logger.error(f"Помилка під час перевірки оновлень: {e}")

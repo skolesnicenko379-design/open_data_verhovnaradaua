@@ -1,7 +1,16 @@
-name: Запуск бота ВРУ
+name: Моніторинг ВРУ
 
 on:
-  workflow_dispatch: # Саме цей рядок додає кнопку для ручного запуску на GitHub
+  workflow_dispatch: # ручний запуск кнопкою
+  schedule:
+    - cron: '*/30 * * * *' # кожні 30 хв (час UTC; GitHub не гарантує точність, можлива затримка)
+
+permissions:
+  contents: write # потрібно, щоб закомітити state.json назад у репозиторій
+
+concurrency:
+  group: vru-bot-run
+  cancel-in-progress: false # не скасовувати попередній прогін, щоб не втратити стан
 
 jobs:
   run-bot:
@@ -10,6 +19,8 @@ jobs:
     steps:
       - name: Завантаження коду з репозиторію
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true # потрібно для подальшого git push
 
       - name: Налаштування Python
         uses: actions/setup-python@v5
@@ -19,9 +30,20 @@ jobs:
       - name: Встановлення залежностей
         run: pip install -r requirements.txt
 
-      - name: Запуск бота
+      - name: Запуск бота (один прохід)
         env:
-          # GitHub Actions автоматично підтягне токени з ваших Secrets
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
         run: python bot.py
+
+      - name: Збереження стану (users / processed_documents)
+        run: |
+          if [ -n "$(git status --porcelain state.json)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add state.json
+            git commit -m "chore: update bot state [skip ci]"
+            git push
+          else
+            echo "state.json без змін, коміт не потрібен"
+          fi

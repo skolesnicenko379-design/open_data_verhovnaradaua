@@ -1,0 +1,27 @@
+name: Запуск бота ВРУ
+
+on:
+  workflow_dispatch: # Саме цей рядок додає кнопку для ручного запуску на GitHub
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Завантаження коду з репозиторію
+        uses: actions/checkout@v4
+
+      - name: Налаштування Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Встановлення залежностей
+        run: pip install -r requirements.txt
+
+      - name: Запуск бота
+        env:
+          # GitHub Actions автоматично підтягне токени з ваших Secrets
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
+        run: python bot.py

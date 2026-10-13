@@ -1,9 +1,9 @@
 name: Моніторинг ВРУ
 
 on:
-  workflow_dispatch: # ручний запуск кнопкою
+  workflow_dispatch: # Саме це вмикає кнопку "Run workflow" у вкладці Actions
   schedule:
-    - cron: '*/30 * * * *' # кожні 30 хв (час UTC; GitHub не гарантує точність, можлива затримка)
+    - cron: '*/30 * * * *' # кожні 30 хв (час UTC)
 
 permissions:
   contents: write # потрібно, щоб закомітити state.json назад у репозиторій
@@ -14,16 +14,15 @@ concurrency:
 
 jobs:
   run-bot:
-    # У Settings → Secrets and variables → Actions можна перемикати MONITORING_ENABLED.
-    # Значення false вимикає виконання бота за розкладом; true або відсутня змінна — вмикає.
+    # У Settings → Secrets and variables → Actions / Variables можна перемикати MONITORING_ENABLED.
     if: github.event_name == 'workflow_dispatch' || vars.MONITORING_ENABLED != 'false'
-    runs-on: self-hosted
+    runs-on: ubuntu-latest # Використовуємо стандартний сервер GitHub
 
     steps:
       - name: Завантаження коду з репозиторію
         uses: actions/checkout@v4
         with:
-          persist-credentials: true # потрібно для подальшого git push
+          persist-credentials: true 
 
       - name: Налаштування Python
         uses: actions/setup-python@v5
@@ -31,7 +30,9 @@ jobs:
           python-version: '3.11'
 
       - name: Встановлення залежностей
-        run: pip install -r requirements.txt
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
       - name: Перевірка синтаксису Python
         run: python -m compileall -q bot.py vru_api.py analysis.py
@@ -44,15 +45,11 @@ jobs:
           OPENROUTER_MODEL: ${{ vars.OPENROUTER_MODEL }}
         run: python bot.py
 
-      - name: Збереження стану (users / processed_documents)
+      - name: Збереження стану (state.json)
         run: |
-          $gitStatus = git status --porcelain state.json
-          if ([string]::IsNullOrWhiteSpace($gitStatus) -eq $false) {
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add state.json
-            git commit -m "chore: update bot state [skip ci]"
-            git push
-          } else {
-            Write-Host "state.json без змін, коміт не потрібен"
-          }
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add state.json
+          # Якщо є зміни, робимо коміт і пуш. Якщо ні — нічого не робимо.
+          git diff --quiet && git diff --staged --quiet || git commit -m "chore: update bot state [skip ci]"
+          git push

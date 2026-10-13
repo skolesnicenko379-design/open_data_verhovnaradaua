@@ -30,7 +30,7 @@ MAX_PAGES = 8
 
 
 def clean_text(value: str) -> str:
-    return re.sub(r"\\s+", " ", value or "").strip()
+    return re.sub(r"\s+", " ", value or "").strip()
 
 
 def get_soup(url: str) -> BeautifulSoup:
@@ -54,7 +54,7 @@ def _pagination_urls(soup: BeautifulSoup, current_url: str) -> list[str]:
 def _card_link(row) -> str | None:
     for anchor in row.select("a[href]"):
         href = urljoin(BASE_URL, anchor["href"])
-        if re.search(r"/billinfo/Bills/Card/\\d+", href, re.I):
+        if re.search(r"/billinfo/Bills/Card/\d+", href, re.I):
             return href
     return None
 
@@ -81,7 +81,7 @@ def list_recent_bills() -> list[dict]:
             if not card_url:
                 continue
             row_text = clean_text(row.get_text(" ", strip=True))
-            match = re.search(r"(?<!\\d)(\\d{4,6}(?:-\\d+)?(?:/П\\d*)?)(?!\\d)", row_text)
+            match = re.search(r"(?<!\d)(\d{4,6}(?:-\d+)?(?:/П\d*)?)(?!\d)", row_text)
             if not match:
                 continue
             number = match.group(1)
@@ -126,7 +126,7 @@ def _extract_linked_document(url: str) -> str:
             if PdfReader is None:
                 return ""
             reader = PdfReader(io.BytesIO(response.content))
-            text = "\\n".join((page.extract_text() or "") for page in reader.pages[:20])
+            text = "\n".join((page.extract_text() or "") for page in reader.pages[:20])
             return clean_text(text)[:18000]
         if "html" in content_type or b"<html" in response.content[:500].lower():
             soup = BeautifulSoup(response.content, "html.parser")
@@ -142,9 +142,9 @@ def _extract_linked_document(url: str) -> str:
 def get_bill_details(item: dict) -> dict | None:
     url = item["card_url"]
     soup = get_soup(url)
-    lines = [clean_text(line) for line in soup.get_text("\\n", strip=True).splitlines()]
+    lines = [clean_text(line) for line in soup.get_text("\n", strip=True).splitlines()]
     lines = [line for line in lines if line]
-    full_text = "\\n".join(lines)
+    full_text = "\n".join(lines)
 
     title = ""
     for line in lines:
@@ -154,13 +154,13 @@ def get_bill_details(item: dict) -> dict | None:
     if not title:
         title = clean_text(item.get("list_title", ""))
     # Не публікуємо постанови, кадрові рішення та інші документи, що не є законопроєктами.
-    if not re.match(r"^(Проєкт|Проект) Закону\\b", title, re.I):
+    if not re.match(r"^(Проєкт|Проект) Закону\b", title, re.I):
         return None
 
     number = item["number"]
     registration_date = ""
     number_date = re.search(
-        r"Номер, дата реєстрації:\\s*(?:\\n\\s*)?([\\d-]+)\\s+від\\s+(\\d{2}\\.\\d{2}\\.\\d{4})",
+        r"Номер, дата реєстрації:\s*(?:\n\s*)?([\d-]+)\s+від\s+(\d{2}\.\d{2}\.\d{4})",
         full_text,
         re.I,
     )
@@ -168,7 +168,7 @@ def get_bill_details(item: dict) -> dict | None:
         number = number_date.group(1)
         registration_date = number_date.group(2)
     else:
-        fallback = re.search(r"(?<!\\d)(\\d{4,6}(?:-\\d+)?)(?:\\s+від\\s+)(\\d{2}\\.\\d{2}\\.\\d{4})", full_text)
+        fallback = re.search(r"(?<!\d)(\d{4,6}(?:-\d+)?)(?:\s+від\s+)(\d{2}\.\d{2}\.\d{4})", full_text)
         if fallback:
             number, registration_date = fallback.groups()
 
@@ -179,15 +179,15 @@ def get_bill_details(item: dict) -> dict | None:
         anchor_name = clean_text(anchor.get_text(" ", strip=True))
         if "Ініціатор(и) законопроєкту" in anchor_name or "Ініціатор(и) законопроєкту" in href:
             in_authors = True
-        if re.search(r"/struct/uk/Structure/MPs\\?userId=", href, re.I):
-            name = re.sub(r"\\s*\\(IX скликання\\)\\s*", "", anchor_name).strip(" ,")
+        if re.search(r"/struct/uk/Structure/MPs\?userId=", href, re.I):
+            name = re.sub(r"\s*\(IX скликання\)\s*", "", anchor_name).strip(" ,")
             if name and name not in authors:
                 authors.append(name)
         # Картка має профільні посилання авторів; збір усіх депутатських посилань тут безпечний,
         # оскільки інші секції картки зазвичай містять комітети як звичайний текст.
     author_profiles = []
     for anchor in soup.select('a[href*="/struct/uk/Structure/MPs?userId="]'):
-        name = re.sub(r"\\s*\\(IX скликання\\)\\s*", "", clean_text(anchor.get_text(" ", strip=True))).strip(" ,")
+        name = re.sub(r"\s*\(IX скликання\)\s*", "", clean_text(anchor.get_text(" ", strip=True))).strip(" ,")
         href = urljoin(BASE_URL, anchor["href"])
         if name and all(p["name"] != name for p in author_profiles):
             author_profiles.append({"name": name, "url": href})
@@ -210,7 +210,7 @@ def get_bill_details(item: dict) -> dict | None:
 
     explanatory_text = _extract_linked_document(explanatory_url) if explanatory_url else ""
     bill_text = _extract_linked_document(bill_text_url) if bill_text_url else ""
-    source_text = (explanatory_text + "\\n" + bill_text).strip()
+    source_text = (explanatory_text + "\n" + bill_text).strip()
     if not source_text:
         # Залишаємо структуровану частину картки як контекст, не видаючи її за повний текст законопроєкту.
         source_text = _text_after_label(lines, "Скорочений текст:", ("Формалізований текст:", "Поділитись:"))
@@ -232,12 +232,12 @@ def get_author_affiliation(profile_url: str) -> str:
     """Повертає партію/фракцію з офіційного профілю депутата."""
     try:
         soup = get_soup(profile_url)
-        lines = [clean_text(line) for line in soup.get_text("\\n", strip=True).splitlines()]
+        lines = [clean_text(line) for line in soup.get_text("\n", strip=True).splitlines()]
         lines = [line for line in lines if line]
         party = _text_after_label(lines, "ПАРТІЯ:")
         faction = _text_after_label(lines, "ФРАКЦІЯ:")
         if faction:
-            faction = re.sub(r"^депутатської фракції\\s+", "", faction, flags=re.I)
+            faction = re.sub(r"^депутатської фракції\s+", "", faction, flags=re.I)
             return faction
         return party or "фракцію/партію не вказано в профілі ВРУ"
     except Exception as exc:

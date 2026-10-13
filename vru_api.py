@@ -267,9 +267,8 @@ def get_bill_details(item: dict) -> dict | None:
     explanatory_text = _extract_linked_document(explanatory_url) if explanatory_url else ""
     bill_text = _extract_linked_document(bill_text_url) if bill_text_url else ""
     source_text = (explanatory_text + "\n" + bill_text).strip()
-    if not source_text:
-        # Залишаємо структуровану частину картки як контекст, не видаючи її за повний текст законопроєкту.
-        source_text = _text_after_label(lines, "Скорочений текст:", ("Формалізований текст:", "Поділитись:"))
+    # Не підміняємо текст законопроєкту висновком комітету чи процедурною нотаткою з картки.
+    # Якщо PDF/DOCX не вдалося прочитати, аналітична модель має побачити відсутність джерельного тексту.
 
     return {
         "number": number,

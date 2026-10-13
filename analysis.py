@@ -10,7 +10,7 @@ import requests
 
 logger = logging.getLogger(__name__)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_MODEL = os.getenv("GROQ_MODEL") or "llama-3.3-70b-versatile"
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 # Це відсів вузьких процедурних законопроєктів, а не фільтр за політичною позицією.

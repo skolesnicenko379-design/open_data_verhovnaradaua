@@ -6,7 +6,7 @@ on:
     - cron: '*/30 * * * *' # кожні 30 хв (час UTC)
 
 permissions:
-  contents: write # потрібно, щоб закомітити state.json назад у репозиторій
+  contents: write # потрібно, щоб закомітувати state.json назад у репозиторій
 
 # Окремі черги для ручних і планових запусків: плановий запуск не витісняє ручний.
 concurrency:
@@ -43,7 +43,8 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          OPENROUTER_MODEL: ${{ vars.OPENROUTER_MODEL }}
+          # Тимчасово тестуємо безкоштовну модель, щоб перевірити, чи причина в доступі до платної моделі/кредитах.
+          OPENROUTER_MODEL: google/gemma-3-4b-it:free
         run: python bot.py
 
       - name: Збереження стану (state.json)

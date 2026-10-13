@@ -117,27 +117,83 @@ def _text_after_label(lines: list[str], label: str, stop_labels: tuple[str, ...]
 
 
 def _extract_linked_document(url: str) -> str:
-    """Зчитує текст пояснювальної записки або проєкту, якщо портал віддає текстовий файл/PDF."""
+    """Завантажує і витягує текст із PDF/DOCX або сторінки документа ВРУ."""
+    def extract_file(response) -> str:
+        content_type = response.headers.get("Content-Type", "").lower()
+        payload = response.content
+        if "pdf" in content_type or payload[:4] == b"%PDF":
+            if PdfReader is None:
+                return ""
+            try:
+                reader = PdfReader(io.BytesIO(payload))
+                return clean_text("\n".join((page.extract_text() or "") for page in reader.pages[:25]))[:18000]
+            except Exception as exc:
+                logger.warning("Не вдалося розібрати PDF %s: %s", response.url, exc)
+                return ""
+        if "wordprocessingml" in content_type or payload[:2] == b"PK":
+            try:
+                from docx import Document
+                document = Document(io.BytesIO(payload))
+                paragraphs = [p.text for p in document.paragraphs if p.text.strip()]
+                for table in document.tables:
+                    for row in table.rows:
+                        paragraphs.append(" | ".join(cell.text for cell in row.cells))
+                return clean_text("\n".join(paragraphs))[:18000]
+            except Exception:
+                return ""
+        if "html" in content_type or b"<html" in payload[:500].lower():
+            return ""
+        return ""
+
     try:
         response = SESSION.get(url, timeout=TIMEOUT)
         response.raise_for_status()
+        text = extract_file(response)
+        if text:
+            return text
+
+        # Сторінка pubFile ВРУ показує кнопку «Завантажити»; сам PDF може бути
+        # відданий окремим запитом форми, а не прямим посиланням.
         content_type = response.headers.get("Content-Type", "").lower()
-        if "pdf" in content_type or response.content[:4] == b"%PDF":
-            if PdfReader is None:
-                return ""
-            reader = PdfReader(io.BytesIO(response.content))
-            text = "\n".join((page.extract_text() or "") for page in reader.pages[:20])
-            return clean_text(text)[:18000]
         if "html" in content_type or b"<html" in response.content[:500].lower():
             soup = BeautifulSoup(response.content, "html.parser")
-            for tag in soup(["script", "style", "nav", "footer", "header"]):
-                tag.decompose()
-            return clean_text(soup.get_text(" ", strip=True))[:18000]
+            for form in soup.find_all("form"):
+                action = urljoin(response.url, form.get("action") or response.url)
+                method = (form.get("method") or "get").lower()
+                data = {}
+                for field in form.select("input[name], select[name], textarea[name]"):
+                    if field.name == "input" and field.get("type", "").lower() in {"submit", "button"}:
+                        continue
+                    data[field["name"]] = field.get("value", "")
+                for button in form.select("button[formaction], input[formaction]"):
+                    action = urljoin(response.url, button.get("formaction"))
+                    if button.get("name"):
+                        data[button["name"]] = button.get("value", "")
+                try:
+                    downloaded = SESSION.request(method, action, data=data if method == "post" else None,
+                                                 params=data if method != "post" else None, timeout=TIMEOUT)
+                    downloaded.raise_for_status()
+                    text = extract_file(downloaded)
+                    if text:
+                        return text
+                except Exception:
+                    continue
+            for anchor in soup.select("a[href]"):
+                label = clean_text(anchor.get_text(" ", strip=True)).casefold()
+                href = urljoin(response.url, anchor["href"])
+                if "завантажити" in label or "download" in label or "download" in href.casefold():
+                    try:
+                        downloaded = SESSION.get(href, timeout=TIMEOUT)
+                        downloaded.raise_for_status()
+                        text = extract_file(downloaded)
+                        if text:
+                            return text
+                    except Exception:
+                        continue
         return ""
     except Exception as exc:
         logger.warning("Не вдалося прочитати супровідний документ %s: %s", url, exc)
         return ""
-
 
 def get_bill_details(item: dict) -> dict | None:
     url = item["card_url"]

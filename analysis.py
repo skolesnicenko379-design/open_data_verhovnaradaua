@@ -55,12 +55,12 @@ def is_obviously_technical(title: str) -> bool:
 def _fallback_analysis(bill: dict) -> dict:
     """Працює без LLM-ключа: коротко описує предмет, не вигадуючи юридичних наслідків."""
     title = bill.get("title", "").strip()
-    subject = re.sub(r"^(Проєкт|Проект) Закону\\s+", "", title, flags=re.I).strip()
+    subject = re.sub(r"^(Проєкт|Проект) Закону\s+", "", title, flags=re.I).strip()
     subject = subject[:360].rstrip(" .")
-    source = re.sub(r"\\s+", " ", bill.get("source_text", "")).strip()
+    source = re.sub(r"\s+", " ", bill.get("source_text", "")).strip()
     source_sentence = ""
     if source:
-        match = re.search(r"(.{60,360}?[.!?])(?:\\s|$)", source)
+        match = re.search(r"(.{60,360}?[.!?])(?:\s|$)", source)
         if match:
             source_sentence = match.group(1).strip()
     if source_sentence:

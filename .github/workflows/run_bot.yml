@@ -14,6 +14,9 @@ concurrency:
 
 jobs:
   run-bot:
+    # У Settings → Secrets and variables → Actions можна перемикати MONITORING_ENABLED.
+    # Значення false вимикає виконання бота за розкладом; true або відсутня змінна — вмикає.
+    if: vars.MONITORING_ENABLED != 'false'
     runs-on: self-hosted
 
     steps:

@@ -9,9 +9,9 @@ import re
 import requests
 
 logger = logging.getLogger(__name__)
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
-GROQ_MODEL = os.getenv("GROQ_MODEL") or "llama-3.3-70b-versatile"
-GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL") or "openai/gpt-4o-mini"
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # Це відсів вузьких процедурних законопроєктів, а не фільтр за політичною позицією.
 TECHNICAL_TITLE_PATTERNS = [
@@ -80,7 +80,7 @@ def _fallback_analysis(bill: dict) -> dict:
         "headline": subject[:150] or title[:150],
         "summary": f"Документ стосується питання «{subject[:300]}».",
         "analysis": analysis,
-        "reason": "Автоматичний резервний режим без GROQ_API_KEY.",
+        "reason": "Автоматичний резервний режим без OPENROUTER_API_KEY.",
     }
 
 
@@ -89,7 +89,7 @@ def analyze_bill(bill: dict) -> dict:
     if is_obviously_technical(title):
         return {"publish": False, "reason": "Процедурна або технічна ініціатива."}
 
-    if not GROQ_API_KEY:
+    if not OPENROUTER_API_KEY:
         # Без LLM не відкидаємо законопроєкт лише через нечітку назву.
         # Вузько процедурні документи вже відсічені вище.
         return _fallback_analysis(bill)
@@ -114,10 +114,15 @@ publish (boolean), headline (короткий український загол�
 """
     try:
         response = requests.post(
-            GROQ_URL,
-            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+            OPENROUTER_URL,
+            headers={
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://github.com/skolesnicenko379-design/open_data_verhovnaradaua",
+                "X-Title": "Моніторинг законопроєктів ВРУ",
+            },
             json={
-                "model": GROQ_MODEL,
+                "model": OPENROUTER_MODEL,
                 "temperature": 0.15,
                 "max_tokens": 650,
                 "response_format": {"type": "json_object"},

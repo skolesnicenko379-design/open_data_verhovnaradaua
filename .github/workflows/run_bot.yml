@@ -30,6 +30,9 @@ jobs:
       - name: Встановлення залежностей
         run: pip install -r requirements.txt
 
+      - name: Перевірка синтаксису Python
+        run: python -m compileall -q bot.py vru_api.py analysis.py
+
       - name: Запуск бота (один прохід)
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}

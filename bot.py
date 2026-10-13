@@ -216,6 +216,9 @@ async def check_new_bills(state: dict) -> None:
             continue
 
         decision = await asyncio.to_thread(analyze_bill, bill)
+        if decision.get("publish") is None:
+            logger.error("№%s залишено необробленим для повторної спроби: %s", number, decision.get("reason", "помилка аналітики"))
+            continue
         if not decision.get("publish"):
             logger.info("Пропущено №%s: %s", number, decision.get("reason", "не пройшов фільтр"))
             processed.add(number)

@@ -124,13 +124,24 @@ def _post_text(bill: dict, analysis: dict, author_lines: list[str]) -> str:
     date = escape(bill.get("date") or "не зазначено")
     summary = escape((analysis.get("summary") or "").strip())
     body = escape((analysis.get("analysis") or "").strip())
-    authors = "\n".join(f"• {escape(line)}" for line in author_lines)
+    display_authors = []
+    authors_length = 0
+    for line in author_lines:
+        safe_line = f"• {escape(line)}"
+        if authors_length + len(safe_line) + 1 > 1750:
+            break
+        display_authors.append(safe_line)
+        authors_length += len(safe_line) + 1
+    omitted_authors = len(author_lines) - len(display_authors)
+    if omitted_authors:
+        display_authors.append(f"• та ще {omitted_authors} автор(и); повний перелік — в офіційній картці")
+    authors = "\n".join(display_authors)
     source = escape(bill.get("card_url", ""), quote=True)
 
     parts = [
         f"<b>{title}</b>",
         f"<b>Дата реєстрації:</b> {date} | <b>№</b> {number}",
-        "<b>Автори та фракції:</b>",
+        "<b>Автори та фракції (за поточними профілями ВРУ):</b>",
         authors,
     ]
     if summary:
@@ -139,9 +150,18 @@ def _post_text(bill: dict, analysis: dict, author_lines: list[str]) -> str:
         parts.append(f"<b>Аналіз:</b> {body}")
     parts.append(f'🔎 <a href="{source}">Офіційна картка законопроєкту</a>')
     result = "\n\n".join(part for part in parts if part)
-    # Telegram message cap is 4096 characters; keep a margin for HTML parsing.
+    # Автори мають пріоритет над описом; обмеження вище зберігає валідний HTML.
     if len(result) > 3900:
-        result = result[:3700] + f'…\n\n🔎 <a href="{source}">Офіційна картка законопроєкту</a>'
+        body = escape((analysis.get("analysis") or "").strip())[:500]
+        result = "\n\n".join([
+            f"<b>{title}</b>",
+            f"<b>Дата реєстрації:</b> {date} | <b>№</b> {number}",
+            "<b>Автори та фракції (за поточними профілями ВРУ):</b>",
+            authors,
+            f"<b>Суть:</b> {summary[:250]}" if summary else "",
+            f"<b>Аналіз:</b> {body}" if body else "",
+            f'🔎 <a href="{source}">Офіційна картка законопроєкту</a>',
+        ])
     return result
 
 

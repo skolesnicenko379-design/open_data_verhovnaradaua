@@ -1,209 +1,228 @@
+"""Telegram-бот для моніторингу змістовних законопроєктів Верховної Ради."""
+from __future__ import annotations
+
 import asyncio
 import json
-import os
-import random
 import logging
+import os
+import re
+from html import escape
 
-import requests
-from aiogram import Bot, html
+from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
-# === НАЛАШТУВАННЯ ===
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHANNEL_ID = os.getenv("CHANNEL_ID")
+from analysis import analyze_bill
+from vru_api import get_author_affiliation, get_bill_details, list_recent_bills
 
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
+CHANNEL_ID = os.getenv("CHANNEL_ID", "").strip()
 STATE_FILE = "state.json"
-MAX_PROCESSED_DOCS = 3000  # щоб файл стану не ріс нескінченно
-MAX_DOCS_PER_RUN = 20      # скільки нових законів публікувати за один прогін
+MAX_PROCESSED_DOCS = 3000
+MAX_DOCS_PER_RUN = 12
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
 
 if not TELEGRAM_TOKEN:
-    raise ValueError("Помилка: TELEGRAM_TOKEN не знайдено у змінних середовища!")
+    raise RuntimeError("Не задано TELEGRAM_TOKEN у Secrets репозиторію.")
 
 bot = Bot(token=TELEGRAM_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 
 
-# === СТАН (JSON-файл, що комітиться назад у репозиторій) ===
 def load_state() -> dict:
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError) as e:
-            logger.error(f"Не вдалося прочитати {STATE_FILE}: {e}. Починаю з чистого стану.")
-    return {
+    default = {
         "users": [],
         "processed_documents": [],
         "last_update_id": 0,
+        "author_affiliations": {},
     }
-
-
-def save_state(state: dict):
-    # обрізаємо список оброблених документів, щоб файл не ріс вічно
-    if len(state["processed_documents"]) > MAX_PROCESSED_DOCS:
-        state["processed_documents"] = state["processed_documents"][-MAX_PROCESSED_DOCS:]
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
-
-
-# === ОБРОБКА КОМАНД /start і /stop ЧЕРЕЗ get_updates ===
-async def process_pending_commands(state: dict):
-    offset = state.get("last_update_id", 0) + 1 if state.get("last_update_id") else None
+    if not os.path.exists(STATE_FILE):
+        return default
     try:
-        updates = await bot.get_updates(offset=offset, timeout=0, allowed_updates=["message"])
-    except Exception as e:
-        logger.error(f"Помилка отримання оновлень Telegram: {e}")
+        with open(STATE_FILE, "r", encoding="utf-8") as file:
+            loaded = json.load(file)
+        if not isinstance(loaded, dict):
+            return default
+        for key, value in default.items():
+            loaded.setdefault(key, value)
+        return loaded
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.exception("Не вдалося прочитати %s: %s", STATE_FILE, exc)
+        return default
+
+
+def save_state(state: dict) -> None:
+    state["processed_documents"] = list(dict.fromkeys(state.get("processed_documents", [])))[-MAX_PROCESSED_DOCS:]
+    with open(STATE_FILE, "w", encoding="utf-8") as file:
+        json.dump(state, file, ensure_ascii=False, indent=2)
+
+
+async def process_pending_commands(state: dict) -> None:
+    offset = int(state.get("last_update_id", 0)) + 1
+    try:
+        updates = await bot.get_updates(
+            offset=offset,
+            timeout=0,
+            allowed_updates=["message"],
+        )
+    except Exception:
+        logger.exception("Не вдалося отримати команди Telegram")
         return
 
-    users = set(state.get("users", []))
-
+    users = {int(user_id) for user_id in state.get("users", [])}
     for update in updates:
         state["last_update_id"] = update.update_id
-        msg = update.message
-        if not msg or not msg.text:
+        message = update.message
+        if not message or not message.text:
             continue
-
-        chat_id = msg.chat.id
-        text = msg.text.strip()
-
-        if text == "/start":
+        command = message.text.split()[0].split("@")[0].lower()
+        chat_id = message.chat.id
+        if command == "/start":
             if chat_id not in users:
                 users.add(chat_id)
                 await bot.send_message(
                     chat_id,
-                    "👋 Привіт! Ви підписалися на моніторинг оновлень законодавства України.\n\n"
-                    "Щойно з'явиться новий документ у базі Верховної Ради, ви отримаєте сповіщення.\n"
-                    "Щоб відписатися, надішліть /stop"
+                    "Ви підписалися на моніторинг змістовних законопроєктів Верховної Ради.\n\n"
+                    "Бот надсилатиме короткий опис ініціатив, авторів, їхніх фракцій і стислий аналіз.\n"
+                    "Щоб відписатися, надішліть /stop.",
                 )
             else:
-                await bot.send_message(chat_id, "Ви вже підписані на розсилку! Очікуйте на нові сповіщення. 🏛")
-        elif text == "/stop":
+                await bot.send_message(chat_id, "Ви вже підписані на сповіщення. Надішліть /stop, щоб відписатися.")
+        elif command == "/stop":
             users.discard(chat_id)
-            await bot.send_message(chat_id, "❌ Ви відписалися від розсилки. Щоб відновити її, надішліть /start")
-
-    state["users"] = list(users)
-
-
-# === ЛОГІКА РОБОТИ З API ВРУ ===
-# GitHub Actions runner щоразу має нову, незареєстровану IP-адресу, тому
-# персональний токен з /api/token (який прив'язаний до зареєстрованої IP)
-# тут не підходить. За документацією порталу JSON-списки та картки
-# документів доступні БЕЗ реєстрації, якщо передавати User-Agent рядком
-# "OpenData" — саме це й використовуємо.
-VRU_USER_AGENT = "OpenData"
-
-# /laws/main/r/docs.json повертає лише "dokid" (внутрішній числовий id), а
-# НЕ "nreg" (системний номер документа), який потрібен для /laws/card і
-# /laws/show. Натомість /laws/main/r[/pageN].json одразу віддає повні
-# реквізити кожного документа (dokid, nreg, nazva, ...), тож окремий запит
-# картки на кожен документ більше не потрібен.
-LIST_URL_TEMPLATE = "https://data.rada.gov.ua/laws/main/r{page_suffix}.json"
-MAX_LIST_PAGES = 3  # скільки сторінок списку переглядати за один прогін
+            await bot.send_message(chat_id, "Підписку вимкнено. Щоб відновити її, надішліть /start.")
+        elif command == "/help":
+            await bot.send_message(chat_id, "/start — підписатися на сповіщення\n/stop — відписатися")
+    state["users"] = sorted(users)
 
 
-def _extract_doc_fields(item: dict) -> dict:
-    # Деякі відповіді порталу гніздять поля документа під ключем "doc",
-    # інші віддають їх на верхньому рівні — підтримуємо обидва варіанти.
-    return item.get("doc", item) if isinstance(item, dict) else {}
+async def _affiliations_for_bill(bill: dict, state: dict) -> list[str]:
+    cache = state.setdefault("author_affiliations", {})
+    profiles = bill.get("author_profiles", [])
+    if not profiles:
+        return bill.get("authors", []) or ["Не зазначено"]
 
-
-async def check_new_laws(state: dict):
-    logger.info("Запуск перевірки оновлень ВРУ...")
-    headers = {"User-Agent": VRU_USER_AGENT, "Accept": "application/json"}
-    processed = set(state.get("processed_documents", []))
-    users = state.get("users", [])
-
-    try:
-        new_docs = []  # [(nreg, nazva), ...] у порядку надходження
-
-        for page in range(1, MAX_LIST_PAGES + 1):
-            page_suffix = "" if page == 1 else f"/page{page}"
-            list_url = LIST_URL_TEMPLATE.format(page_suffix=page_suffix)
-            list_resp = await asyncio.to_thread(requests.get, list_url, headers=headers, timeout=15)
-
-            if list_resp.status_code != 200:
-                logger.error(f"Список (стор. {page}): {list_resp.status_code} — {list_resp.text[:300]!r}")
-                break
-
+    result = []
+    for profile in profiles:
+        name = profile["name"]
+        url = profile["url"]
+        if url not in cache:
             try:
-                documents = list_resp.json()
-            except ValueError:
-                logger.error(f"Список (стор. {page}) не є JSON: {list_resp.text[:300]!r}")
-                break
-
-            if not documents:
-                break  # далі сторінок немає
-
-            page_had_new = False
-            for item in documents:
-                doc_info = _extract_doc_fields(item)
-                nreg = doc_info.get("nreg")
-                if not nreg or nreg in processed:
-                    continue
-                page_had_new = True
-                nazva = doc_info.get("nazva", "Без назви")
-                new_docs.append((nreg, nazva))
-
-            # якщо на цій сторінці все вже оброблено раніше — подальші
-            # (ще старіші) сторінки точно нічого нового не дадуть
-            if not page_had_new:
-                break
-
-            if page < MAX_LIST_PAGES:
-                await asyncio.sleep(random.uniform(5.0, 7.0))
-
-        if not new_docs:
-            logger.info("Нових документів немає.")
-            return
-
-        logger.info(f"Знайдено нових документів: {len(new_docs)}")
-
-        for nreg, nazva in new_docs[:MAX_DOCS_PER_RUN]:
-            doc_url = f"https://data.rada.gov.ua/laws/show/{nreg}"
-
-            msg_text = (
-                f"🏛 <b>Оновлення законодавства</b>\n\n"
-                f"<b>Назва:</b> {html.quote(nazva)}\n"
-                f"<b>Номер:</b> {html.quote(nreg)}\n\n"
-                f"📄 <a href='{doc_url}'>Переглянути документ</a>"
-            )
-
-            if CHANNEL_ID:
-                try:
-                    await bot.send_message(CHANNEL_ID, msg_text)
-                except Exception as e:
-                    logger.error(f"Помилка відправки в канал: {e}")
-
-            for chat_id in users:
-                try:
-                    await bot.send_message(chat_id, msg_text)
-                except Exception as e:
-                    logger.error(f"Помилка відправки користувачу {chat_id}: {e}")
-
-            processed.add(nreg)
-
-        # документи поза MAX_DOCS_PER_RUN лишаємо необробленими навмисно —
-        # вони підтягнуться в наступному прогоні (через 30 хв)
-
-    except Exception as e:
-        logger.error(f"Помилка під час перевірки оновлень: {e}")
-    finally:
-        state["processed_documents"] = list(processed)
+                cache[url] = await asyncio.to_thread(get_author_affiliation, url)
+            except Exception:
+                logger.exception("Помилка профілю депутата: %s", url)
+                cache[url] = "фракцію/партію не вдалося підтвердити"
+        affiliation = cache[url]
+        result.append(f"{name} — {affiliation}")
+    return result or ["Не зазначено"]
 
 
-# === ОДИН ПРОХІД: читаємо стан -> обробляємо команди -> перевіряємо закони -> зберігаємо стан ===
-async def main():
+def _post_text(bill: dict, analysis: dict, author_lines: list[str]) -> str:
+    title = escape(analysis.get("headline") or bill.get("title") or "Законопроєкт")
+    number = escape(str(bill.get("number") or "не зазначено"))
+    date = escape(bill.get("date") or "не зазначено")
+    summary = escape((analysis.get("summary") or "").strip())
+    body = escape((analysis.get("analysis") or "").strip())
+    authors = "\n".join(f"• {escape(line)}" for line in author_lines)
+    source = escape(bill.get("card_url", ""), quote=True)
+
+    parts = [
+        f"<b>{title}</b>",
+        f"<b>Дата реєстрації:</b> {date} | <b>№</b> {number}",
+        "<b>Автори та фракції:</b>",
+        authors,
+    ]
+    if summary:
+        parts.append(f"<b>Суть:</b> {summary}")
+    if body:
+        parts.append(f"<b>Аналіз:</b> {body}")
+    parts.append(f'🔎 <a href="{source}">Офіційна картка законопроєкту</a>')
+    result = "\n\n".join(part for part in parts if part)
+    # Telegram message cap is 4096 characters; keep a margin for HTML parsing.
+    if len(result) > 3900:
+        result = result[:3700] + f'…\n\n🔎 <a href="{source}">Офіційна картка законопроєкту</a>'
+    return result
+
+
+async def _send_post(text: str, state: dict) -> bool:
+    sent = False
+    if CHANNEL_ID:
+        try:
+            await bot.send_message(CHANNEL_ID, text, disable_web_page_preview=True)
+            sent = True
+            logger.info("Опубліковано допис у каналі %s", CHANNEL_ID)
+        except Exception:
+            logger.exception("Не вдалося опублікувати допис у каналі")
+    for chat_id in state.get("users", []):
+        try:
+            await bot.send_message(int(chat_id), text, disable_web_page_preview=True)
+            sent = True
+        except Exception:
+            logger.warning("Не вдалося надіслати допис користувачу %s", chat_id, exc_info=True)
+    if not sent:
+        logger.warning("Допис не доставлено: перевір CHANNEL_ID і права бота в каналі.")
+    return sent
+
+
+async def check_new_bills(state: dict) -> None:
+    logger.info("Перевірка нових законопроєктів ВРУ")
+    try:
+        listed = await asyncio.to_thread(list_recent_bills)
+    except Exception:
+        logger.exception("Не вдалося отримати перелік законопроєктів")
+        return
+
+    processed = set(str(value) for value in state.get("processed_documents", []))
+    candidates = [item for item in listed if str(item.get("number")) not in processed]
+    logger.info("Карток у переліку: %d; нових для обробки: %d", len(listed), len(candidates))
+
+    handled = 0
+    for item in candidates:
+        if handled >= MAX_DOCS_PER_RUN:
+            break
+        number = str(item.get("number", "")).strip()
+        if not number:
+            continue
+        try:
+            bill = await asyncio.to_thread(get_bill_details, item)
+        except Exception:
+            logger.exception("Не вдалося прочитати картку №%s", number)
+            continue
+        if not bill:
+            # Це не законопроєкт (наприклад, проєкт постанови), тож повторно перевіряти не потрібно.
+            processed.add(number)
+            handled += 1
+            continue
+
+        decision = await asyncio.to_thread(analyze_bill, bill)
+        if not decision.get("publish"):
+            logger.info("Пропущено №%s: %s", number, decision.get("reason", "не пройшов фільтр"))
+            processed.add(number)
+            handled += 1
+            continue
+
+        authors = await _affiliations_for_bill(bill, state)
+        post = _post_text(bill, decision, authors)
+        if await _send_post(post, state):
+            processed.add(number)
+            handled += 1
+        else:
+            # Не позначаємо як опублікований: бот повторить спробу під час наступного запуску.
+            logger.error("№%s залишено необробленим через помилку доставки", number)
+
+    state["processed_documents"] = list(processed)
+    logger.info("Завершено. Опрацьовано нових карток: %d", handled)
+
+
+async def main() -> None:
     state = load_state()
     try:
         await process_pending_commands(state)
-        await check_new_laws(state)
+        await check_new_bills(state)
     finally:
         save_state(state)
         await bot.session.close()
-    logger.info("Прогін завершено.")
 
 
 if __name__ == "__main__":

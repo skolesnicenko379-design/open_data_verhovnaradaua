@@ -90,10 +90,8 @@ def analyze_bill(bill: dict) -> dict:
         return {"publish": False, "reason": "Процедурна або технічна ініціатива."}
 
     if not GROQ_API_KEY:
-        # Без ключа лишаємо тільки теми, що за назвою мають очевидний вплив на політику/суспільство.
-        lowered = title.casefold()
-        if not any(term in lowered for term in POLICY_TERMS):
-            return {"publish": False, "reason": "Недостатньо ознак суспільно значущої зміни в назві; LLM-ключ не налаштовано."}
+        # Без LLM не відкидаємо законопроєкт лише через нечітку назву.
+        # Вузько процедурні документи вже відсічені вище.
         return _fallback_analysis(bill)
 
     prompt_data = {

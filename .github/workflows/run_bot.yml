@@ -8,9 +8,10 @@ on:
 permissions:
   contents: write # потрібно, щоб закомітити state.json назад у репозиторій
 
+# Окремі черги для ручних і планових запусків: плановий запуск не витісняє ручний.
 concurrency:
-  group: vru-bot-run
-  cancel-in-progress: false # не скасовувати попередній прогін, щоб не втратити стан
+  group: vru-bot-run-${{ github.event_name }}
+  cancel-in-progress: false
 
 jobs:
   run-bot:

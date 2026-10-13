@@ -133,6 +133,8 @@ publish (boolean), headline (короткий український загол�
             },
             timeout=45,
         )
+        if not response.ok:
+            logger.error("OpenRouter HTTP %s для №%s: %s", response.status_code, bill.get("number"), response.text[:1500])
         response.raise_for_status()
         raw = response.json()["choices"][0]["message"]["content"]
         result = json.loads(_strip_code_fence(raw))

@@ -119,7 +119,7 @@ publish (boolean), headline (короткий український загол�
                 "Authorization": f"Bearer {OPENROUTER_API_KEY}",
                 "Content-Type": "application/json",
                 "HTTP-Referer": "https://github.com/skolesnicenko379-design/open_data_verhovnaradaua",
-                "X-Title": "Моніторинг законопроєктів ВРУ",
+                "X-Title": "VRU Bill Monitor",
             },
             json={
                 "model": OPENROUTER_MODEL,
@@ -147,4 +147,4 @@ publish (boolean), headline (короткий український загол�
     except Exception as exc:
         logger.exception("LLM-аналітика не спрацювала для №%s: %s", bill.get("number"), exc)
         # Якщо модель недоступна, не замінюємо аналіз вигаданими висновками.
-        return {"publish": False, "reason": "Не вдалося отримати перевірюваний аналітичний текст."}
+        return {"publish": None, "reason": "Не вдалося отримати перевірюваний аналітичний текст."}
